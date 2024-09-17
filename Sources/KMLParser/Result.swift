@@ -29,8 +29,13 @@ public typealias Result = (ResultType) -> ()
 public enum ResultType {
     
     /// success with value as json dict
-    case success(annotations: [KMLAnnotation], overlays: [any KMLOverlay])
-    
+    case success(
+        annotations: [KMLAnnotation],
+        polygons: [KMLPolygon],
+        lines: [KMLLineString],
+        circles: [KMLCircle]
+    )
+
     /// failure with some reason
     case failure(reason: Reason)
     

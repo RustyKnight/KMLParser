@@ -11,51 +11,54 @@ import MapKit
 
 public struct KMLData: @unchecked Sendable {
     public let annotations: [KMLAnnotation]
-    public let overlays: [any KMLOverlay]
+    public var polygons: [KMLPolygon]
+    public var lines: [KMLLineString]
+    public var circles: [KMLCircle]
 }
 
 open class KMLParser: NSObject, XMLParserDelegate {
-    
+
     // actual parser
     private var parser: XMLParser?
-    
+
     // options
     private var options: KMLOptions?
-    
+
     // lookup table during parsing
     private var kmlObjectLookup: [KMLElement: KMLValue] = [:]
-    
+
     // styles
     private var styles: [String: [KMLStyle]] = [:]
-    
+
     // style map
     private var styleMaps: [String: [String: String]] = [:]
-    
+
     // extended data
     private var extendedData: [String: String] = [:]
-    
+
     private var currentDataKey: String?
-    
+
     // current style id
     private var currentStyleId: String?
-    
+
     // current style map id
     private var currentStyleMapId: String?
-    
+
     // current element in parsing
     private var currentElement: KMLElement?
-    
+
     // full xpath to current element
     private var currentElementPath: KMLElementPath = []
-    
+
     // to be converted kml features to MKAnnotations and MKOverlays
     private var features: [KMLFeature] = []
-    
-    /// parsed overlays from KML document
-    private var overlays: [any KMLOverlay] = []
 
     /// parsed points from KML document
     private var annotations: [KMLAnnotation] = []
+
+    private var polygons: [KMLPolygon] = []
+    private var lines: [KMLLineString] = []
+    private var circles: [KMLCircle] = []
 
     /// result handler
     public var completion: Result?
@@ -64,9 +67,9 @@ open class KMLParser: NSObject, XMLParserDelegate {
     private init(data: Data) {
         parser = XMLParser(data: data)
     }
-    
+
     // MARK: - API
-    
+
     /// parse: Parses a kml document and returns a `Result`
     /// - Parameter data: A Data object representing the KML xml content
     /// - Parameter options
@@ -82,10 +85,12 @@ open class KMLParser: NSObject, XMLParserDelegate {
         return try await withCheckedThrowingContinuation { continuation in
             KMLParser.parse(with: data, options: options) { result in
                 switch result {
-                case let .success(annotations, overlays):
+                case let .success(annotations, polygons, lines, circles):
                     let data = KMLData(
                         annotations: annotations,
-                        overlays: overlays
+                        polygons: polygons,
+                        lines: lines,
+                        circles: circles
                     )
                     continuation.resume(returning: data)
                 case let .failure(reason):
@@ -99,65 +104,82 @@ open class KMLParser: NSObject, XMLParserDelegate {
     }
 
     // MARK: - XMLParserDelegate
-    
+
     public func parserDidStartDocument(_ parser: XMLParser) {
-        overlays = []
+        lines = []
+        annotations = []
+        polygons = []
+        circles = []
+
         styles = [:]
         styleMaps = [:]
     }
-    
+
     /// End parsing
     public func parserDidEndDocument(_ parser: XMLParser) {
         _ = features.compactMap { [weak self] feature -> [MKAnnotation]? in
-            
-            ///guard let `self` = self else { return annotations
-            
-                let styles = self?.styles(with: feature.styleId)
-            
-                let annotations = feature.annotation(styles: styles)
 
-                return annotations
-            }
-            .map {
-                for overlay in $0 {
-                    if let overlay = overlay as? any KMLOverlay {
-                        overlays.append(overlay)
-                    } else if let overlay = overlay as? KMLAnnotation {
-                        annotations.append(overlay)
-                    }
+            ///guard let `self` = self else { return annotations
+
+            let styles = self?.styles(with: feature.styleId)
+
+            let annotations = feature.annotation(styles: styles)
+
+            return annotations
+        }
+        .map {
+            for overlay in $0 {
+                if let overlay = overlay as? KMLAnnotation {
+                    annotations.append(overlay)
+                } else if let overlay = overlay as? KMLPolygon {
+                    polygons.append(overlay)
+                } else if let overlay = overlay as? KMLLineString {
+                    lines.append(overlay)
+                } else if let overlay = overlay as? KMLCircle {
+                    circles.append(overlay)
+                } else {
+                    print("Ignoring \(overlay)")
                 }
             }
+        }
 
         if let completion = completion {
-            completion(ResultType.success(annotations: annotations, overlays: overlays))
+            completion(
+                ResultType.success(
+                    annotations: annotations,
+                    polygons: polygons,
+                    lines: lines,
+                    circles: circles
+                )
+            )
         }
-        
+
         //clean
         features = []
         styles = [:]
     }
-    
-    
+
+
     /// Start element
     public func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String : String] = [:]) {
-        
+
         currentElement = KMLElement(rawValue: elementName)
-        
+
         guard
             let element = currentElement
-            else {
-                return
-            }
-        
+        else {
+            return
+        }
+
         currentElementPath.append(element)
-        
+
         switch element {
         case .multiGeometry:
             let multiGeo = MultiGeometry()
             kmlObjectLookup[.multiGeometry] = multiGeo
         case .style:
             guard attributeDict["id"] != nil else { return }
-            
+
             guard let id = attributeDict["id"] else {
                 return
             }
@@ -166,7 +188,7 @@ open class KMLParser: NSObject, XMLParserDelegate {
             styles[hashedId] = []
         case .styleMap:
             guard attributeDict["id"] != nil else { return }
-            
+
             guard let id = attributeDict["id"] else {
                 return
             }
@@ -182,25 +204,25 @@ open class KMLParser: NSObject, XMLParserDelegate {
         default:
             break
         }
-        
+
     }
-    
+
     /// End element
     public func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
-    
+
         guard
             let element = KMLElement(rawValue: elementName)
-            else {
-                return
+        else {
+            return
         }
-        
+
         defer {
             if currentElementPath.count > 0 {
                 currentElementPath.removeLast()
             }
             currentElement = nil
         }
-        
+
         switch element {
         case .style:
             currentStyleId = nil
@@ -235,41 +257,41 @@ open class KMLParser: NSObject, XMLParserDelegate {
         case .polygon:
             do {
                 if let polygon = try self.createGeometryFromLookup(with: .polygon) {
-                    
+
                     if var multi = kmlObjectLookup[.multiGeometry] as? MultiGeometry {
-                       
-                       multi.elements.append(polygon)
-                       kmlObjectLookup[.multiGeometry] = multi
-                        
+
+                        multi.elements.append(polygon)
+                        kmlObjectLookup[.multiGeometry] = multi
+
                     } else {
                         kmlObjectLookup[.geometry] = polygon
                     }
                 }
             } catch {
-                
+
             }
-            
-        // required element from polygon, should be ring
+
+            // required element from polygon, should be ring
         case .outerBoundaryIs:
             if let ring = kmlObjectLookup[.linearRing] as? Geometry {
                 kmlObjectLookup[.outerBoundaryIs] = ring
                 kmlObjectLookup.removeValue(forKey: .linearRing)
             }
         case .linearRing:
-        
+
             if let coords = kmlObjectLookup[.coordinates] as? KMLCoordValue {
-                
+
                 guard coords.coords[0] == coords.coords[coords.coords.count-1] else {
                     return
                 }
-            
+
                 kmlObjectLookup[.linearRing] = LinearRing(coordinates: coords.coords)
                 kmlObjectLookup.removeValue(forKey: .coordinates)
             }
         case .point:
             if let coords = kmlObjectLookup[.coordinates] as? KMLCoordValue{
                 guard coords.coords.count > 0 else { return }
-                
+
                 if let pointToCircleRadius = options?.pointToCircleRadius, pointToCircleRadius > 0 {
                     kmlObjectLookup[.geometry] = Circle(geo: (center: coords.coords[0], radius: pointToCircleRadius))
                 } else {
@@ -294,10 +316,10 @@ open class KMLParser: NSObject, XMLParserDelegate {
                 let width = kmlObjectLookup[.width] as? KMLFloatValue,
                 let color = kmlObjectLookup[.color] as? KMLColorValue,
                 let id = currentStyleId
-                 else {
-                    return
-                }
-    
+            else {
+                return
+            }
+
             styles[id]?.append(KMLStyle.line(color: color.value, width: width.value))
         case .polyStyle:
             defer {
@@ -310,17 +332,17 @@ open class KMLParser: NSObject, XMLParserDelegate {
                 let fill = kmlObjectLookup[.fill] as? KMLBoolValue,
                 let color = kmlObjectLookup[.color] as? KMLColorValue,
                 let id = currentStyleId
-                else {
-                    return
+            else {
+                return
             }
-            
+
             styles[id]?.append(KMLStyle.poly(color: color.value, fill: fill.value, outline: outline.value))
         default:
             break
         }
-        
+
     }
-    
+
     /// Parse value
     public func parser(_ parser: XMLParser, foundCharacters string: String) {
         switch currentElement {
@@ -352,23 +374,23 @@ open class KMLParser: NSObject, XMLParserDelegate {
         case .some(.description):
             kmlObjectLookup[.description] = KMLStringValue(value: string)
         case .some(.styleUrl):
-        
+
             //style map
             if currentElementPath[currentElementPath.count - 2] == .pair {
-                
+
                 //assumes normal key is first
                 guard let currentStyleMapId = currentStyleMapId else { return }
-                
+
                 if styleMaps[currentStyleMapId]?.count == 0 {
                     styleMaps[currentStyleMapId]?["normal"] = string
                 } else {
                     styleMaps[currentStyleMapId]?["highlight"] = string
                 }
-                
+
             } else {
                 kmlObjectLookup[.styleUrl] = KMLStringValue(value: string)
             }
-            
+
         case .some(.key) where KMLParser.findParentGeometryElement(in: currentElementPath) == .pair:
             guard let currentStyleMapId = currentStyleMapId else { return }
             //assumes some semantics that key is found first!!
@@ -377,42 +399,42 @@ open class KMLParser: NSObject, XMLParserDelegate {
             //coordinates can be removed
             //let path = Array(currentElementPath.dropLast())
             let coords = KMLParser.parseCoordinates(with: string)
-            
+
             guard coords.count > 0 else {
                 return
             }
-            
+
             kmlObjectLookup[.coordinates] = KMLCoordValue(coords: coords)
         default:
             break
         }
     }
-    
-    
+
+
     /// MARK: - Private
-    
+
     /// Creates a geometry object
     private func createGeometryFromLookup(with element: KMLElement) throws -> Geometry? {
         switch element {
         case .polygon:
-            
+
             guard let outer = kmlObjectLookup[.outerBoundaryIs] as? LinearRing else {
                 throw XMLParser.SemanticError.polygonError("outerBoundaryIs is required for a polygon")
             }
-            
+
             let polygon = Polygon(outerBoundaryIs: outer, innerBoundaryIs: [])
-            
+
             kmlObjectLookup.removeValue(forKey: .outerBoundaryIs)
-            
+
             return polygon
-            
+
         default:
             break
         }
-        
+
         return nil
     }
-    
+
     /// Parse coordinates from tag
     private static func parseCoordinates(with coordString: String) -> [CLLocationCoordinate2D] {
         var coordinates: [CLLocationCoordinate2D] = []
@@ -424,16 +446,16 @@ open class KMLParser: NSObject, XMLParserDelegate {
                 points.count >= 2,
                 let lat = CLLocationDegrees(points[1]),
                 let long = CLLocationDegrees(points[0])
-                else {
-                    break
-                }
+            else {
+                break
+            }
             let coord = CLLocationCoordinate2D(latitude: lat, longitude: long)
             coordinates.append(coord)
         }
         return coordinates
     }
-    
-    /// 
+
+    ///
     private static func findParentGeometryElement(in path: KMLElementPath) -> KMLElement? {
         let reversedPath = path.reversed()
         for i in reversedPath.indices {
@@ -443,17 +465,17 @@ open class KMLParser: NSObject, XMLParserDelegate {
         }
         return nil
     }
-    
+
     ///
     private func styles(with styleId: String?) -> [KMLStyle]? {
-        
+
         guard let styleId = styleId else { return nil }
-        
+
         let style = styleMaps[styleId]?["normal"] ?? styleId
-        
+
         guard let applicableStyles = styles[style] else { return nil }
-        
+
         return applicableStyles
     }
-    
+
 }
